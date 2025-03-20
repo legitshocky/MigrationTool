@@ -1,0 +1,218 @@
+function recommendTeachers() {
+  const profilingSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Teacher Profiling");
+  const statsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Teacher Moodle Stats");
+  const slotsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Teacher Slots");
+
+  // Ensure all sheets exist
+  if (!profilingSheet) {
+    Logger.log('Error: "Teacher Profiling" sheet not found.');
+    return;
+  }
+  if (!statsSheet) {
+    Logger.log('Error: "Teacher Moodle Stats" sheet not found.');
+    return;
+  }
+  if (!slotsSheet) {
+    Logger.log('Error: "Teacher Slots" sheet not found.');
+    return;
+  }
+
+  // Clear all outputs from B10 to the last column (to remove any previous data and borders)
+  const outputStartRow = 10;
+  const outputColumns = profilingSheet.getLastColumn() - 1; // Adjust to the last column used
+  const lastRow = profilingSheet.getLastRow();
+  const rowsToClear = lastRow - outputStartRow + 1;
+  const outputRange = profilingSheet.getRange(outputStartRow, 2, rowsToClear > 0 ? rowsToClear : 1, outputColumns);
+  outputRange.clearContent();
+  setBorders(outputRange, false); // Remove borders
+  Logger.log("Outputs cleared, including borders.");
+
+  // Get current and future courses from C4:C7
+  const courseInputRange = profilingSheet.getRange("C4:C7").getValues().flat().filter(course => course);
+
+  // Exit early if no courses are provided
+  if (courseInputRange.length === 0) {
+    Logger.log("No courses provided. Outputs cleared.");
+    return;
+  }
+
+  // Convert all input courses to lowercase for case-insensitive comparison
+  const lowerCaseCourses = courseInputRange.map(course => course.toLowerCase());
+
+  // Read headers and data from the Moodle Stats sheet
+  const headers = statsSheet.getRange("E2:BB2").getValues()[0]; // Course headers
+  const teacherData = statsSheet.getRange(3, 1, statsSheet.getLastRow() - 2, statsSheet.getLastColumn()).getValues();
+
+  const teacherRecommendations = {};
+
+  // Helper function to check qualifications
+  function qualifies(percentage) {
+    if (!percentage || percentage.includes("Not onboarded")) return false;
+    const match = percentage.match(/^\d+-\d+%|^\d+%$/);
+    return match ? parseInt(match[0], 10) >= 50 : false;
+  }
+
+  // Process courses and populate teacher recommendations
+  lowerCaseCourses.forEach((course, courseIndex) => {
+    const courseHeaderIndex = headers.map(header => header.toLowerCase()).indexOf(course); // Convert headers to lowercase
+
+    if (courseHeaderIndex === -1) {
+      Logger.log(`Course "${course}" not found in stats sheet.`);
+      return;
+    }
+
+    const columnIndex = courseHeaderIndex + 4; // Offset to match Moodle Stats columns
+    teacherData.forEach(row => {
+      const teacherName = row[0];
+      const percentage = row[columnIndex];
+
+      if (qualifies(percentage)) {
+        if (!teacherRecommendations[teacherName]) {
+          teacherRecommendations[teacherName] = { percentages: {}, totalScore: 0, coursesQualified: 0 };
+        }
+        if (!teacherRecommendations[teacherName].percentages[course]) {
+          teacherRecommendations[teacherName].percentages[course] = percentage;
+          teacherRecommendations[teacherName].totalScore += parseInt(percentage, 10);
+          teacherRecommendations[teacherName].coursesQualified++;
+        }
+      }
+    });
+  });
+
+  // Sort teachers based on their qualifications and score
+  const sortedTeachers = Object.entries(teacherRecommendations).sort((a, b) => {
+    // First, sort by the number of courses qualified
+    if (b[1].coursesQualified !== a[1].coursesQualified) {
+      return b[1].coursesQualified - a[1].coursesQualified; // More courses qualified ranks higher
+    }
+
+    // If same number of courses qualified, sort by total score (percentage)
+    return b[1].totalScore - a[1].totalScore; // Higher percentage ranks higher
+  });
+
+  // Prepare data for output
+  const outputData = sortedTeachers.map(([teacherName, data]) => {
+    const percentages = lowerCaseCourses.map(course => data.percentages[course] || "N/A");
+    return [teacherName, ...percentages, data.coursesQualified];
+  });
+
+  // Capitalize first letter of each word in the headers
+  const headersRow = ["Recommend Teacher", ...lowerCaseCourses.map(course => capitalizeWords(course)), "Courses Qualified"];
+
+  // Write headers for courses
+  profilingSheet.getRange(9, 3, 1, headersRow.length).setValues([headersRow]);
+
+  // Write teacher and percentage data (only if there is data)
+  if (outputData.length > 0) {
+    profilingSheet.getRange(10, 3, outputData.length, outputData[0].length).setValues(outputData);
+    setBorders(profilingSheet.getRange(10, 3, outputData.length, outputData[0].length), true); // Add borders if there's data
+  }
+
+  // Add sequential numbers (1, 2, 3, 4, 5, ...) in column B (always)
+  const countData = Array.from({ length: outputData.length }, (_, i) => [i + 1]);
+  if (countData.length > 0) {
+    profilingSheet.getRange(10, 2, countData.length, 1).setValues(countData);
+    setBorders(profilingSheet.getRange(10, 2, countData.length, 1), true); // Add borders to count column
+  }
+
+  // Add teacher slots dynamically
+  const slotData = addTeacherSlots(profilingSheet, slotsSheet, sortedTeachers, lowerCaseCourses);
+
+  // Determine the total number of columns used
+  const totalColumns = headersRow.length + slotData.length;
+
+  // Ensure borders are applied to all output cells even if they are empty
+  const totalRows = Math.max(outputData.length, 1);
+  setBorders(profilingSheet.getRange(10, 2, totalRows, totalColumns), true); // Apply borders for all rows dynamically
+
+  Logger.log("Teacher recommendations updated successfully.");
+}
+
+// Helper function to capitalize the first letter of each word in a string
+function capitalizeWords(str) {
+  return str.split(' ').map(word => {
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  }).join(' ');
+}
+
+// Set borders to the output range
+function setBorders(range, add) {
+  range.setBorder(add, add, add, add, add, add);
+}
+
+// Function to add teacher slots dynamically
+function addTeacherSlots(profilingSheet, slotsSheet, sortedTeachers, lowerCaseCourses) {
+  const slotsHeadersRange = slotsSheet.getRange(1, 6, 1, 19); // Columns F:S (19 columns)
+  const slotsHeaders = slotsHeadersRange.getValues()[0];
+
+  // Check if slotsHeaders is not empty
+  if (slotsHeaders.length === 0) {
+    Logger.log("No available slots found in the Teacher Slots sheet.");
+    return [];
+  }
+
+  const slotsRange = slotsSheet.getRange(2, 1, slotsSheet.getLastRow() - 1, slotsSheet.getLastColumn());
+  const slotsValues = slotsRange.getValues();
+
+  const slotData = {};
+  slotsValues.forEach(row => {
+    const teacherName = row[0];
+    if (!slotData[teacherName]) {
+      slotData[teacherName] = {};
+    }
+    for (let i = 5; i < row.length; i++) { // Start from column F (index 5)
+      const day = slotsHeaders[i - 5];
+      slotData[teacherName][day] = row[i];
+    }
+  });
+
+  const inputDates = profilingSheet.getRange("E4:E7").getValues().flat().filter(date => date);
+  const inputTimes = profilingSheet.getRange("F4:F7").getValues().flat().filter(time => time);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); 
+  const twoWeeksFromToday = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+  let relevantSlots;
+  if (inputDates.length === 0) {
+    relevantSlots = slotsHeaders.filter(header => {
+      const slotDate = new Date(header);
+      return slotDate >= today && slotDate <= twoWeeksFromToday;
+    });
+  } else {
+    relevantSlots = inputDates.filter(date => {
+      return slotsHeaders.some(header => {
+        try {
+          const slotDate = new Date(header);
+          const inputDate = new Date(date);
+          return slotDate.toISOString() === inputDate.toISOString();
+        } catch (e) {
+          Logger.log(`Invalid date format: ${header}`);
+          return false;
+        }
+      });
+    });
+  }
+
+  let anyTeacherAvailable = false;
+  sortedTeachers.forEach(([teacherName, data], index) => {
+    const row = index + 10;
+    relevantSlots.forEach((header, dayIndex) => {
+      try {
+        const slot = slotData[teacherName] ? slotData[teacherName][header] || "No Slots" : "No Slots";
+        profilingSheet.getRange(row, 3 + lowerCaseCourses.length + 2 + dayIndex).setValue(slot);
+        if (slot !== "No Slots") {
+          anyTeacherAvailable = true;
+        }
+      } catch (e) {
+        Logger.log(`Error processing slot for ${teacherName}: ${e.message}`);
+      }
+    });
+  });
+
+  if (!anyTeacherAvailable && inputDates.length > 0) {
+    profilingSheet.getRange(10, 2, 1, 1).setValue("No teacher available for the provided time. Kindly contact TP Manager.");
+  }
+
+  return relevantSlots;
+}
